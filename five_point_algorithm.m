@@ -1,4 +1,4 @@
-function [E, Eo] = five_point_algorithm( pts1, pts2, K1, K2 )
+function [E_all, R_all, t_all, Eo_all] = five_point_algorithm( pts1, pts2, K1, K2 )
 %FIVE_POINT_ALGORITHM Given five points matches between two images, and the
 % intrinsic parameters of each camera. Estimate the essential matrix E, the 
 % rotation matrix R and translation vector t, between both images. This 
@@ -6,39 +6,40 @@ function [E, Eo] = five_point_algorithm( pts1, pts2, K1, K2 )
 % Efficient Solution to the Five-Point Relative Pose Problem"
 % DOI: http://dx.doi.org/10.1109/TPAMI.2004.17
 %
-% E = FIVE_POINT_ALGORITHM(pts1, pts2, K1, K2) returns the Essential matrix
-% enforcing the restriction U*diag([1 1 0])*V' 
+% E = FIVE_POINT_ALGORITHM(pts1, pts2, K1, K2) returns in E all the valid
+% Essential matrix solutions for the five point correspondence. If you
+% don't need the R and t, use this version as it avoids computing
+% unnecessary results.
 %
-% [E, Eo] = FIVE_POINT_ALGORITHM(pts1, pts2, K1, K2) returns the Essential 
-% matrix enforcing the restriction U*diag([1 1 0])*V', and original matrix
-% computed by the method in Eo.
+% [E_all, R_all, t_all, Eo_all] = FIVE_POINT_ALGORITHM(pts1, pts2, K1, K2) 
+% also returns in R_all and t_all all the rotation matrices and translation
+% vectors of camera 2 for the different essential matrices, such that a 3D
+% point in camera 1 reference frame can be transformed into the camera 2
+% reference frame through p_2 = R{n}*p_1 + t{n}. Eo_all is the essential
+% matrix before the imposing the structure U*diag([1 1 0])*V'. It should
+% help get a better feeling on the accuracy of the solution. All these
+% return values a nx1 cell arrays. 
+%
 %
 % Arguments:
 % pts1, pts2 - assumed to have dimension 2x5 and of equal size. 
 % K1, K2 - 3x3 intrinsic parameters of cameras 1 and 2 respectively
-% 
-% Returns:
-% E - U*diag([1 1 0])*V'
-% Eo - E as it is estimated originally
 %
-% Known Issues:
-% The algorithm is still incomplete. I'm releasing it at this early stage
-% because it already provides proper estimates of the essential matrix.
-% Although there is more than one solution, I'm currently only returning
-% the first. I still need to figure out how to select the "best" if such
-% exists. 
+% Know Issues:
+% - R and t computation is done assuming perfect point correspondence.
 %
 % TODO:
-% - Extract R and t from E
-% - Provide example cases.
+% - Extract R and t without perfect point correspondence
+% - Augment example cases.
 % - Implement the variant with 5 points over 3 images
 % - Handle more than 5 points
 %
 % Author: Sergio Agostinho - sergio(dot)r(dot)agostinho(at)gmail(dot)com 
 % Date: Feb 2015
-% Version: 0.8
+% Last modified: Mar 2015
+% Version: 0.9
 % Repo: https://github.com/SergioRAgostinho/five_point_algorithm
-% Feel free to provide feedback or aid in the development. 
+% Feel free to provide feedback or contribute.
 
 if ~all(size(pts1) == [2,5]) || ~all(size(pts2) == [2,5])
     error('five_point_algorithm:wrong_dimensions','pts1 and pts2 must be of size 2x5');
@@ -216,69 +217,124 @@ n_row_scaled = n_row/n_row(1);
 e_val = eig([-n_row_scaled(2:end);
             eye(9), zeros(9,1)]);
         
-%Select the first real root
-%TODO: Find if there's a "best" solution 
+
+m = 0;
 for n = 1:10
     if ~isreal(e_val(n))
         continue
     end
     
+    m = m + 1;
+end
+
+R_all = cell(m,1);
+t_all = cell(m,1);
+E_all = cell(m,1);
+Eo_all = cell(m,1);
+
+m = 1;
+for n = 1:10
+    if ~isreal(e_val(n))
+        continue
+    end
     z = e_val(n);
-    break
+
+    %Backsubstition
+    p_z6 = [z^6; z^5; z^4; z^3; z^2; z; 1];
+    p_z7 = [z^7; p_z6];
+
+    x = (p_1*p_z7)/(p_3*p_z6);
+    y = (p_2*p_z7)/(p_3*p_z6);
+
+    Eo = x*Xmat + y*Ymat + z*Zmat + Wmat;
+    Eo_all{m} = Eo;
+    [U,~,V] = svd(Eo);
+
+
+    E = U*diag([1 1 0])*V';
+    E_all{m} = E;
+
+    %stop here if nothing else is required to be computed
+    if nargout < 2
+        m = m + 1;
+        continue
+    end
+    
+    %check determinan signs
+    if(det(U) < 0)
+        U(:,3) = -U(:,3);
+    end
+
+    if (det(V) < 0)
+        V(:,3) = -V(:,3);
+    end
+
+    %Extracting R and t from E 
+    D = [0  1   0;
+         -1 0   0;
+         0  0   1];
+
+    q_1 = q1(:,1);
+    q_2 = q2(:,1);
+
+
+    for n = 1:4
+        switch(n)
+            case 1
+                t = U(:,3);
+                R = U*D*V';
+            case 2
+                t = -U(:,3);
+                R = U*D*V';
+            case 3
+                t = U(:,3);
+                R = U*D'*V';
+            case 4
+                t = -U(:,3);
+                R = U*D'*V';
+        end
+
+        %Cheirality (points in front of the camera) constraint assuming perfect
+        %point correspondence
+        a = E'*q_2;
+        b = cross_vec3(q_1, [a(1:2); 0]);
+        c = cross_vec3(q_2, diag([1 1 0])*E*q_1);
+        d = cross_vec3(a, b);
+
+        P = [R t];
+        C = P'*c;
+        Q = [d*C(4); -d(1:3)'*C(1:3)];
+
+        %Cheirality test
+
+        %behind the 1st camera
+        if (Q(3)*Q(4) < 0)    
+            continue
+        end
+
+        %behind the 2nd camera
+        c_2 = P*Q;
+        if (c_2(3)*Q(4) < 0)
+            continue
+        end
+
+        R_all{m} = R;
+        t_all{m} = t;
+        break
+    end
+    m = m + 1;
 end
 
-%Backsubstition
-p_z6 = [z^6; z^5; z^4; z^3; z^2; z; 1];
-p_z7 = [z^7; p_z6];
-
-x = (p_1*p_z7)/(p_3*p_z6);
-y = (p_2*p_z7)/(p_3*p_z6);
-
-Eo = x*Xmat + y*Ymat + z*Zmat + Wmat;
-[U,~,V] = svd(Eo);
-
-
-E = U*diag([1 1 0])*V';            
-
-% if nargout < 3
-%     return
-% end
-
-% %check determinan signs
-% if(det(U) < 0)
-%     U(:,3) = -U(:,3);
-% end
-% 
-% if (det(V) < 0)
-%     V(:,3) = -V(:,3);
-% end
-% 
-% %Extracting R and t from E 
-% D = [0  1   0;
-%      -1 0   0;
-%      0  0   1];
-%  
-% for n = 1:4
-%     switch(n)
-%         case 1
-%             t = U(:,3);
-%             R = U*D*V';
-%         case 2
-%             t = -U(:,3);
-%             R = U*D*V';
-%         case 3
-%             t = U(:,3);
-%             R = U*D'*V';
-%         case 4
-%             t = -U(:,3);
-%             R = U*D'*V';
-%     end
-%     
-%     
-%     
-% end
 end
 
+function out = cross_vec3(u, v)
+%CROSS_VEC Function to compute the cross product of two 3D column vectors.
+%The default MATLAB implementation is simply too slow. 
+
+out = [ u(2)*v(3) - u(3)*v(2);
+        u(3)*v(1) - u(1)*v(3);
+        u(1)*v(2) - u(2)*v(1)];
+end
 
 function po = pz6pz4(p1, p2)
 %PZ4PZ3 Function responsible for multiplying a 6th order z polynomial p1
